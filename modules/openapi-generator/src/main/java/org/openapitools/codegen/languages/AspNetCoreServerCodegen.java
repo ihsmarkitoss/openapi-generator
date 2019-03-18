@@ -129,8 +129,6 @@ public class AspNetCoreServerCodegen extends AbstractCSharpCodegen {
                 CodegenConstants.SOURCE_FOLDER_DESC,
                 sourceFolder);
 
-        addOption(COMPATIBILITY_VERSION, "ASP.Net Core CompatibilityVersion", compatibilityVersion);
-
         aspnetCoreVersion.addEnum("2.0", "ASP.NET COre V2.0");
         aspnetCoreVersion.addEnum("2.1", "ASP.NET COre V2.1");
         aspnetCoreVersion.addEnum("2.2", "ASP.NET COre V2.2");
@@ -385,12 +383,9 @@ public class AspNetCoreServerCodegen extends AbstractCSharpCodegen {
             embeddedTemplateDir = templateDir = "aspnetcore/2.0";
             supportingFiles.add(new SupportingFile("web.config", packageFolder, "web.config"));
             LOGGER.info("ASP.NET core version: 2.0");
-            compatibilityVersion = null;
         } else {
             // default, do nothing
             LOGGER.info("ASP.NET core version: " + aspnetCoreVersion.getOptValue());
-            compatibilityVersion = "Version_" + aspnetCoreVersion.getOptValue().replace(".","_");
         }
-        additionalProperties.put(COMPATIBILITY_VERSION, compatibilityVersion);
     }
 }
