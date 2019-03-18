@@ -74,9 +74,7 @@ public class CliOption {
         return this;
     }
 
-    public String getOptValue() {
-        return this.optValue;
-    }
+    public String getOptValue() { return this.optValue;}
     public void setOptValue(String optValue) {
         if (this.enumValues!=null && this.enumValues.containsKey(optValue)) {
             this.optValue = optValue;
