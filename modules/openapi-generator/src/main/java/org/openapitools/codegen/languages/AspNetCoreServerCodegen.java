@@ -19,6 +19,7 @@ package org.openapitools.codegen.languages;
 
 import com.samskivert.mustache.Mustache;
 import io.swagger.v3.oas.models.OpenAPI;
+import io.swagger.v3.parser.util.SchemaTypeUtil;
 import org.openapitools.codegen.*;
 import org.openapitools.codegen.utils.URLPathUtils;
 import org.slf4j.Logger;
@@ -38,13 +39,17 @@ public class AspNetCoreServerCodegen extends AbstractCSharpCodegen {
     public static final String ASPNET_CORE_VERSION = "aspnetCoreVersion";
     public static final String CLASS_MODIFIER = "classModifier";
     public static final String OPERATION_MODIFIER = "operationModifier";
+    public static final String OPERATION_IS_ASYNC = "operationIsAsync";
+    public static final String OPERATION_RESULT_TASK = "operationResultTask";
     public static final String GENERATE_BODY = "generateBody";
     public static final String BUILD_TARGET = "buildTarget";
+    public static final String MODEL_CLASS_MODIFIER = "modelClassModifier";
 
     public static final String PROJECT_SDK = "projectSdk";
     public static final String SDK_WEB = "Microsoft.NET.Sdk.Web";
     public static final String SDK_LIB = "Microsoft.NET.Sdk";
     public static final String COMPATIBILITY_VERSION = "compatibilityVersion";
+    public static final String IS_LIBRARY = "isLibrary";
 
     private String packageGuid = "{" + randomUUID().toString().toUpperCase(Locale.ROOT) + "}";
 
@@ -54,13 +59,18 @@ public class AspNetCoreServerCodegen extends AbstractCSharpCodegen {
     private boolean useSwashbuckle = true;
     protected int serverPort = 8080;
     protected String serverHost = "0.0.0.0";
-    protected CliOption aspnetCoreVersion= new CliOption(ASPNET_CORE_VERSION,"ASP.NET Core version: 2.2 (default), 2.1, 2.0 (deprecated)");; // default to 2.1
-    private CliOption classModifier = new CliOption(CLASS_MODIFIER,"Class Modifier can be empty, abstract");
+    protected CliOption aspnetCoreVersion = new CliOption(ASPNET_CORE_VERSION, "ASP.NET Core version: 2.2 (default), 2.1, 2.0 (deprecated)");
+    ; // default to 2.1
+    private CliOption classModifier = new CliOption(CLASS_MODIFIER, "Class Modifier can be empty, abstract");
     private CliOption operationModifier = new CliOption(OPERATION_MODIFIER, "Operation Modifier can be virtual, abstract or partial");
+    private CliOption modelClassModifier = new CliOption(MODEL_CLASS_MODIFIER, "Model Class Modifier can be nothing or partial");
     private boolean generateBody = true;
     private CliOption buildTarget = new CliOption("buildTarget", "Target to build an application or library");
     private String projectSdk = SDK_WEB;
     private String compatibilityVersion = "Version_2_1";
+    private boolean operationIsAsync = false;
+    private boolean operationResultTask = false;
+    private boolean isLibrary = false;
 
     public AspNetCoreServerCodegen() {
         super();
@@ -136,7 +146,7 @@ public class AspNetCoreServerCodegen extends AbstractCSharpCodegen {
         aspnetCoreVersion.addEnum("2.2", "ASP.NET COre V2.2");
         aspnetCoreVersion.setDefault("2.2");
         aspnetCoreVersion.setOptValue(aspnetCoreVersion.getDefault());
-        addOption(aspnetCoreVersion.getOpt(),aspnetCoreVersion.getDescription(),aspnetCoreVersion.getOptValue());
+        addOption(aspnetCoreVersion.getOpt(), aspnetCoreVersion.getDescription(), aspnetCoreVersion.getOptValue());
 
         // CLI Switches
         addSwitch(CodegenConstants.SORT_PARAMS_BY_REQUIRED_FLAG,
@@ -159,27 +169,46 @@ public class AspNetCoreServerCodegen extends AbstractCSharpCodegen {
                 "Uses the Swashbuckle.AspNetCore NuGet package for documentation.",
                 useSwashbuckle);
 
+        addSwitch(IS_LIBRARY,
+                "Is the build a library",
+                isLibrary);
+
         classModifier.addEnum("", "Keep class default with no modifier");
         classModifier.addEnum("abstract", "Make class abstract");
         classModifier.setDefault("");
         classModifier.setOptValue(classModifier.getDefault());
-        addOption(classModifier.getOpt(),classModifier.getDescription(),classModifier.getOptValue());
+        addOption(classModifier.getOpt(), classModifier.getDescription(), classModifier.getOptValue());
 
         operationModifier.addEnum("virtual", "Keep method virtual ");
         operationModifier.addEnum("abstract", "Make method abstract");
         operationModifier.setDefault("virtual");
         operationModifier.setOptValue(operationModifier.getDefault());
-        addOption(operationModifier.getOpt(),operationModifier.getDescription(),operationModifier.getOptValue());
+        addOption(operationModifier.getOpt(), operationModifier.getDescription(), operationModifier.getOptValue());
 
         buildTarget.addEnum("program", "Generate code for standalone server");
         buildTarget.addEnum("library", "Generate code for a server abstract class lbrary");
         buildTarget.setDefault("program");
         buildTarget.setOptValue(buildTarget.getDefault());
-        addOption(buildTarget.getOpt(),buildTarget.getDescription(),buildTarget.getOptValue());
+        addOption(buildTarget.getOpt(), buildTarget.getDescription(), buildTarget.getOptValue());
 
         addSwitch(GENERATE_BODY,
                 "Generates method body.",
                 generateBody);
+
+        addSwitch(OPERATION_IS_ASYNC,
+                "Set methods to async or sync.",
+                operationIsAsync);
+
+        addSwitch(OPERATION_RESULT_TASK,
+                "Set methods result to Task<>.",
+                operationResultTask);
+
+        modelClassModifier.setType("String");
+        modelClassModifier.addEnum("", "Keep model class default with no modifier");
+        modelClassModifier.addEnum("partial", "Make model class partial");
+        modelClassModifier.setDefault("partial");
+        modelClassModifier.setOptValue(modelClassModifier.getDefault());
+        addOption(modelClassModifier.getOpt(), modelClassModifier.getDescription(), modelClassModifier.getOptValue());
 
     }
 
@@ -209,7 +238,6 @@ public class AspNetCoreServerCodegen extends AbstractCSharpCodegen {
     @Override
     public void processOpts() {
         super.processOpts();
-        boolean isLibrary = false;
 
         if (additionalProperties.containsKey(CodegenConstants.OPTIONAL_PROJECT_GUID)) {
             setPackageGuid((String) additionalProperties.get(CodegenConstants.OPTIONAL_PROJECT_GUID));
@@ -225,10 +253,10 @@ public class AspNetCoreServerCodegen extends AbstractCSharpCodegen {
 
         // CHeck for the modifiers etc.
         // The order of the checks is important.
-        isLibrary = setBuildTarget();
+        setBuildTarget();
         setClassModifier();
         setOperationModifier();
-
+        setCliOption(modelClassModifier);
 
         // CHeck for class modifier if not present set the default value.
         additionalProperties.put(PROJECT_SDK, projectSdk);
@@ -326,16 +354,24 @@ public class AspNetCoreServerCodegen extends AbstractCSharpCodegen {
         return escapeText(pattern);
     }
 
-    private void  setCliOption(CliOption cliOption) throws IllegalArgumentException {
+    private void setCliOption(CliOption cliOption) throws IllegalArgumentException {
         if (additionalProperties.containsKey(cliOption.getOpt())) {
-            cliOption.setOptValue(additionalProperties.get(cliOption.getOpt()).toString());
-            if (classModifier.getOptValue() == null) {
-                cliOption.setOptValue(cliOption.getDefault());
-                throw new IllegalArgumentException(cliOption.getOpt() + ": Invalid value '" + additionalProperties.get(cliOption.getOpt()).toString() + "'" +
-                        ". " + cliOption.getDescription());
+            // TODO Hack - not sure why the empty strings become boolean.
+            Object obj = additionalProperties.get(cliOption.getOpt());
+            if (cliOption.getType() != SchemaTypeUtil.BOOLEAN_TYPE) {
+                if (obj instanceof Boolean) {
+                    obj = "";
+                    additionalProperties.put(cliOption.getOpt(), obj);
+                }
             }
+            cliOption.setOptValue(obj.toString());
         } else {
             additionalProperties.put(cliOption.getOpt(), cliOption.getOptValue());
+        }
+        if (cliOption.getOptValue() == null) {
+            cliOption.setOptValue(cliOption.getDefault());
+            throw new IllegalArgumentException(cliOption.getOpt() + ": Invalid value '" + additionalProperties.get(cliOption.getOpt()).toString() + "'" +
+                    ". " + cliOption.getDescription());
         }
     }
 
@@ -347,7 +383,7 @@ public class AspNetCoreServerCodegen extends AbstractCSharpCodegen {
         if ("abstract".equals(classModifier.getOptValue())) {
             operationModifier.setOptValue(classModifier.getOptValue());
             additionalProperties.put(OPERATION_MODIFIER, operationModifier.getOptValue());
-            LOGGER.warn("classModifier is " + classModifier.getOptValue() + " so forcing operatonModifier to "+ operationModifier.getOptValue());
+            LOGGER.warn("classModifier is " + classModifier.getOptValue() + " so forcing operatonModifier to " + operationModifier.getOptValue());
         } else {
             setCliOption(operationModifier);
         }
@@ -360,23 +396,25 @@ public class AspNetCoreServerCodegen extends AbstractCSharpCodegen {
         if ("abstract".equals(operationModifier.getOptValue())) {
             generateBody = false;
             additionalProperties.put(GENERATE_BODY, generateBody);
-            LOGGER.warn("operationModifier is " + operationModifier.getOptValue() + " so forcing generateBody to "+ generateBody);
-        } else  if (additionalProperties.containsKey(GENERATE_BODY)) {
+            LOGGER.warn("operationModifier is " + operationModifier.getOptValue() + " so forcing generateBody to " + generateBody);
+        } else if (additionalProperties.containsKey(GENERATE_BODY)) {
             generateBody = convertPropertyToBooleanAndWriteBack(GENERATE_BODY);
         } else {
             additionalProperties.put(GENERATE_BODY, generateBody);
         }
     }
 
-    private boolean setBuildTarget() {
-        boolean isLibrary = false;
+    private void setBuildTarget() {
         setCliOption(buildTarget);
         if ("library".equals(buildTarget.getOptValue())) {
             isLibrary = true;
             projectSdk = SDK_LIB;
             additionalProperties.put(CLASS_MODIFIER, "abstract");
+        } else {
+            isLibrary = false;
+            projectSdk = SDK_WEB;
         }
-        return isLibrary;
+        additionalProperties.put(IS_LIBRARY, isLibrary);
     }
 
     private void setAspnetCoreVersion(String packageFolder) {
@@ -389,7 +427,7 @@ public class AspNetCoreServerCodegen extends AbstractCSharpCodegen {
         } else {
             // default, do nothing
             LOGGER.info("ASP.NET core version: " + aspnetCoreVersion.getOptValue());
-            compatibilityVersion = "Version_" + aspnetCoreVersion.getOptValue().replace(".","_");
+            compatibilityVersion = "Version_" + aspnetCoreVersion.getOptValue().replace(".", "_");
         }
         additionalProperties.put(COMPATIBILITY_VERSION, compatibilityVersion);
     }
