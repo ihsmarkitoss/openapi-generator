@@ -17,13 +17,11 @@
 
 package org.openapitools.codegen.languages;
 
-import com.google.common.collect.ImmutableMap;
 import io.swagger.v3.oas.models.OpenAPI;
 import io.swagger.v3.oas.models.PathItem;
 import io.swagger.v3.oas.models.Paths;
 import io.swagger.v3.oas.models.responses.ApiResponse;
 import io.swagger.v3.oas.models.responses.ApiResponses;
-import io.swagger.v3.parser.util.SchemaTypeUtil;
 import org.openapitools.codegen.*;
 import org.openapitools.codegen.meta.features.*;
 import org.openapitools.codegen.templating.mustache.OnChangeLambda;
@@ -35,6 +33,7 @@ import com.samskivert.mustache.Mustache.Lambda;
 
 import io.swagger.v3.oas.models.Operation;
 
+import java.io.File;
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
@@ -49,26 +48,24 @@ import java.util.HashMap;
  * - Add option to override existing lambda code.
  * - Add option to pass in lambda layers information - not sure how to do this.
  * - Add option to control generation of infrastructure code
- * - Add option to control generation of decorated spec file.
+ * - DONE Add option to control generation of decorated spec file.
  * - Add option to provide SAM template file to decorate.
  * - Terraform: Create lambda variables file.
  * - Terraform: Documentation on how to use the generated terraform files.
  * - SAM: Decorate the provided SAM template file.
- *
+ * <p>
  * - Complete the Spec annotation
- *   - Needs response option
- *   - check other annotations needed agains AWS documentation.
+ * - Needs response option
+ * - check other annotations needed agains AWS documentation.
  */
 
 public class AWSCodegen extends DefaultCodegen implements CodegenConfig {
 
     private final Logger LOGGER = LoggerFactory.getLogger(AWSCodegen.class);
 
-    public static final String INFRASTRUCTURE_FRAMEWORK = "infrastructureFramework";
-    public static final String INFRASTRUCTURE_FRAMEWORK_DESC = "The target infrastructure framework version.";
+    public static final String AWS_GENERATOR_NAME = "aws";
 
 
-    public static final String OUTPUT_NAME = "outputFile";
     public final static String AWSExtensionOperation = "x-amazon-apigateway-integration";
     public final static String AWSPassthrougBehavior = "passthroughBehavior";
     public final static String AWSType = "type";
@@ -84,15 +81,31 @@ public class AWSCodegen extends DefaultCodegen implements CodegenConfig {
     protected String awsPassthroughBehavior = "when_no_match";
 
     // Project Variable, determined from target framework. Not intended to be user-settable.
-    private static AWSCodegen.InfrastructureFramework defaultInfrastructureFramework = InfrastructureFramework.TERRAFORM;
-    protected String infrastructureFrameworkString = defaultInfrastructureFramework.name;
+    public static final String INFRASTRUCTURE_FRAMEWORK = "infrastructureFramework";
+    public static final String INFRASTRUCTURE_FRAMEWORK_DESC = "The target infrastructure framework version. Current choices are Terraform, SAM, CloudFormation";
+    private CliOption infrastructureFrameworkCli = new CliOption(AWSCodegen.INFRASTRUCTURE_FRAMEWORK, AWSCodegen.INFRASTRUCTURE_FRAMEWORK_DESC);
+    protected static AWSCodegen.InfrastructureFramework defaultInfrastructureFramework = InfrastructureFramework.TERRAFORM;
     protected InfrastructureFramework infrastructureFramework = defaultInfrastructureFramework;
-    private CliOption infrastructureFrameworkCLI = new CliOption(AWSCodegen.INFRASTRUCTURE_FRAMEWORK,AWSCodegen.INFRASTRUCTURE_FRAMEWORK_DESC);
 
-    protected String outputFile = "openapi-aws/openapi.yaml";
+    public static final String GENERATE_SPEC = "generateSpec";
+    public static final String GENERATE_SPEC_DESC = "Generate the spec file with AWS annotation. Choices are true or false. Default is true.";
+    protected static boolean generateSpecDefault = true;
+    protected boolean generateSpec = generateSpecDefault;
+
+    public static final String SPEC_ADD_AWS_OPERATION = "specAddAwsOperation";
+    public static final String SPEC_ADD_AWS_OPERATION_DESC = "Add AWS vendor extensions for operations to the spec file. Choices are true or false. Default is true.";
+    protected static boolean specAddAwsOperationDefault = true;
+    protected boolean specAddAwsOperation = specAddAwsOperationDefault;
+
+    public static final String OUTPUT_SPEC_FILE = "outputSpecFile";
+    public static final String OUTPUT_SPEC_FILE_DESC = "Filename of the generated spec file. Default is openapi.yaml";
+    protected static String outputSpecFileDefault = "openapi-aws.yaml";
+    protected String outputSpecFile = outputSpecFileDefault;
 
     public AWSCodegen() {
+
         super();
+
 
         modifyFeatureSet(features -> features
                 .documentationFeatures(EnumSet.allOf(DocumentationFeature.class))
@@ -104,17 +117,21 @@ public class AWSCodegen extends DefaultCodegen implements CodegenConfig {
                 .schemaSupportFeatures(EnumSet.allOf(SchemaSupportFeature.class))
         );
 
-        embeddedTemplateDir = templateDir = "JavaAWS";
-        outputFolder = "generated-code/JavaAWS";
-        cliOptions.add(CliOption.newString(OUTPUT_NAME, "Output filename").defaultValue(outputFile));
+        embeddedTemplateDir = templateDir = "AWS";
+        outputFolder = "generated-code/AWS";
+        addOption(OUTPUT_SPEC_FILE,OUTPUT_SPEC_FILE_DESC,outputSpecFile);
+
         supportingFiles.add(new SupportingFile("README.md", "", "README.md"));
 
         for (AWSCodegen.InfrastructureFramework infrastructureFrameworkLoop : AWSCodegen.InfrastructureFramework.values()) {
-            infrastructureFrameworkCLI.addEnum(infrastructureFrameworkLoop.name, infrastructureFrameworkLoop.description);
+            infrastructureFrameworkCli.addEnum(infrastructureFrameworkLoop.name, infrastructureFrameworkLoop.description);
         }
-        infrastructureFrameworkCLI.defaultValue(AWSCodegen.defaultInfrastructureFramework.name);
-        infrastructureFrameworkCLI.setOptValue(AWSCodegen.defaultInfrastructureFramework.name);
-        cliOptions.add(infrastructureFrameworkCLI);
+        infrastructureFrameworkCli.defaultValue(AWSCodegen.defaultInfrastructureFramework.name);
+        infrastructureFrameworkCli.setOptValue(AWSCodegen.defaultInfrastructureFramework.name);
+        cliOptions.add(infrastructureFrameworkCli);
+
+        addSwitch(GENERATE_SPEC, GENERATE_SPEC_DESC, generateSpec);
+        addSwitch(SPEC_ADD_AWS_OPERATION, SPEC_ADD_AWS_OPERATION_DESC, specAddAwsOperation);
 
     }
 
@@ -125,7 +142,7 @@ public class AWSCodegen extends DefaultCodegen implements CodegenConfig {
 
     @Override
     public String getName() {
-        return "openapi-aws";
+        return AWS_GENERATOR_NAME;
     }
 
     @Override
@@ -136,21 +153,21 @@ public class AWSCodegen extends DefaultCodegen implements CodegenConfig {
     @Override
     public void processOpts() {
         super.processOpts();
-        if (additionalProperties.containsKey(OUTPUT_NAME)) {
-            outputFile = additionalProperties.get(OUTPUT_NAME).toString();
+
+        generateSpec = getSwitch(GENERATE_SPEC, generateSpec);
+        specAddAwsOperation = getSwitch(SPEC_ADD_AWS_OPERATION, specAddAwsOperation);
+        if (generateSpec == true) {
+            outputSpecFile = getOption(OUTPUT_SPEC_FILE,outputSpecFile);
+            supportingFiles.add(new SupportingFile("openapi.mustache", outputSpecFile));
         }
-        LOGGER.info("Output file [outputFile={}]", outputFile);
-        supportingFiles.add(new SupportingFile("openapi.mustache", outputFile));
 
         String infrastructureFrameworkName = (String) additionalProperties.getOrDefault(AWSCodegen.INFRASTRUCTURE_FRAMEWORK, AWSCodegen.defaultInfrastructureFramework.name);
-        LOGGER.info(AWSCodegen.INFRASTRUCTURE_FRAMEWORK +": returned value is {}",  infrastructureFrameworkName);
-        boolean strategyMatched = false;
         this.infrastructureFramework = AWSCodegen.InfrastructureFramework.findByName(infrastructureFrameworkName);
-        LOGGER.info(AWSCodegen.INFRASTRUCTURE_FRAMEWORK +": value is {}",  this.infrastructureFramework.name);
-
-        setCliOption(infrastructureFrameworkCLI);
+        templateDir = "AWS";
+        embeddedTemplateDir = "AWS" ;
 
         // Set the template directory based on the infrastructure type.
+        supportingFiles.add(new SupportingFile(this.infrastructureFramework.name+ File.separator+"lambda.auto.tfvars.mustache", "", "lambda.auto.tfvars"));
 
     }
 
@@ -193,93 +210,75 @@ public class AWSCodegen extends DefaultCodegen implements CodegenConfig {
     /**
      * Add in the AWS API Gateway Specific tags
      * They should look like
-     *
-     *       x-amazon-apigateway-integration:
-     *         uri: arn:aws:apigateway:${region}:lambda:path/2015-03-31/functions/${GetIntegrations}/invocations
-     *         responses:
-     *           default:
-     *             statusCode: "200"
-     *         passthroughBehavior: when_no_match
-     *         httpMethod: POST
-     *         timeoutInMillis: 29000
-     *         contentHandling: CONVERT_TO_TEXT
-     *         type: aws_proxy
+     * <p>
+     * x-amazon-apigateway-integration:
+     * uri: arn:aws:apigateway:${region}:lambda:path/2015-03-31/functions/${GetIntegrations}/invocations
+     * responses:
+     * default:
+     * statusCode: "200"
+     * passthroughBehavior: when_no_match
+     * httpMethod: POST
+     * timeoutInMillis: 29000
+     * contentHandling: CONVERT_TO_TEXT
+     * type: aws_proxy
      *
      * @param openAPI - The spec to be processed.
      */
 
-    private void setCliOption(CliOption cliOption) throws IllegalArgumentException {
-        if (additionalProperties.containsKey(cliOption.getOpt())) {
-            // TODO Hack - not sure why the empty strings become boolean.
-            Object obj = additionalProperties.get(cliOption.getOpt());
-            if (!SchemaTypeUtil.BOOLEAN_TYPE.equals(cliOption.getType())) {
-                if (obj instanceof Boolean) {
-                    obj = "";
-                    additionalProperties.put(cliOption.getOpt(), obj);
-                }
-            }
-            cliOption.setOptValue(obj.toString());
-        } else {
-            additionalProperties.put(cliOption.getOpt(), cliOption.getOptValue());
-        }
-        if (cliOption.getOptValue() == null) {
-            cliOption.setOptValue(cliOption.getDefault());
-            throw new IllegalArgumentException(cliOption.getOpt() + ": Invalid value '" + additionalProperties.get(cliOption.getOpt()).toString() + "'" +
-                    ". " + cliOption.getDescription());
-        }
-    }
-
-
     @Override
     public void processOpenAPI(OpenAPI openAPI) {
+
+        // If not required to decorate then do not do it.
+        if (generateSpec == false) return;
+        ;
 
         // ICODE -> Check if the AWS vendor extensions are already present and if they should be replaced, augumented or skipped when present.
         //openAPI.addExtension("x-amazon-apigateway-gateway-responses", "This is a test");
         Paths paths = openAPI.getPaths();
         for (PathItem path : paths.values()) {
-            Map<PathItem.HttpMethod, Operation> operations = path.readOperationsMap();
-            for (Map.Entry<PathItem.HttpMethod, Operation> operationsEntry : operations.entrySet()) {
-                Operation operation = operationsEntry.getValue();
-                PathItem.HttpMethod httpMethod = operationsEntry.getKey();
-                Map<String,Object> extension = new HashMap<String,Object>();
+            if (specAddAwsOperation == true) {
+                // Add the AWS operation related vendor extension.
+                Map<PathItem.HttpMethod, Operation> operations = path.readOperationsMap();
+                for (Map.Entry<PathItem.HttpMethod, Operation> operationsEntry : operations.entrySet()) {
+                    Operation operation = operationsEntry.getValue();
+                    PathItem.HttpMethod httpMethod = operationsEntry.getKey();
+                    Map<String, Object> extension = new HashMap<String, Object>();
 
-                extension.put(AWSUri, getAWSARNUri(operation.getOperationId()));
-                extension.put(AWSHttpMethod, httpMethod);
-                extension.put(AWSPassthrougBehavior, awsPassthroughBehavior);
-                extension.put(AWSTimeoutInMillis, awsTimeoutInMillis);
-                extension.put(AWSType, awsType);
-                extension.put(AWSContentHandling, awsContentHandling);
+                    extension.put(AWSUri, getAWSARNUri(operation.getOperationId()));
+                    extension.put(AWSHttpMethod, httpMethod);
+                    extension.put(AWSPassthrougBehavior, awsPassthroughBehavior);
+                    extension.put(AWSTimeoutInMillis, awsTimeoutInMillis);
+                    extension.put(AWSType, awsType);
+                    extension.put(AWSContentHandling, awsContentHandling);
 
-                // Build the response structure:
-                // ICODE -> need to review the whole responses section.
-                Map<String,Object> responses = new HashMap<String,Object>();
-                ApiResponses apiResponses = operation.getResponses();
-                for (Map.Entry<String, ApiResponse> responsesEntry : apiResponses.entrySet()) {
-                    ApiResponse apiResponse = responsesEntry.getValue();
-                    String key = responsesEntry.getKey();
-                    Map<String,Object> response = new HashMap<String,Object>();
-                    response.put("Key:", key);
-                    response.put("value:", apiResponse.getDescription());
-                    responses.put(key,response);
+                    // Build the response structure:
+                    // ICODE -> need to review the whole responses section.
+                    Map<String, Object> responses = new HashMap<String, Object>();
+                    ApiResponses apiResponses = operation.getResponses();
+                    for (Map.Entry<String, ApiResponse> responsesEntry : apiResponses.entrySet()) {
+                        ApiResponse apiResponse = responsesEntry.getValue();
+                        String key = responsesEntry.getKey();
+                        Map<String, Object> response = new HashMap<String, Object>();
+                        response.put("Key:", key);
+                        response.put("value:", apiResponse.getDescription());
+                        responses.put(key, response);
+                    }
+                    //extension.put(AWSResponses, responses);
+
+                    operation.addExtension(AWSExtensionOperation, extension);
                 }
-                //extension.put(AWSResponses, responses);
-
-                operation.addExtension(AWSExtensionOperation, extension);
             }
         }
     }
 
     private String getAWSARNUri(String lambdaName) {
         String arnUri = null;
-        LOGGER.info("Generating for {}", this.infrastructureFramework);
         switch (this.infrastructureFramework) {
             case TERRAFORM:
-                LOGGER.info("Found Tf {}", this.infrastructureFramework);
                 arnUri = "arn:aws:apigateway:${region}:lambda:path/2015-03-31/functions/${" + lambdaName + "}/invocations";
                 break;
             case CLOUDFORMATION:
             case SAM:
-                LOGGER.info("Found CFN {}", this.infrastructureFramework);
                 arnUri = "{\"Fn::Sub\": \"arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${\"" + lambdaName + "\"Function.Arn}/invocations\"}";
                 break;
             default:
@@ -289,10 +288,65 @@ public class AWSCodegen extends DefaultCodegen implements CodegenConfig {
     }
 
 
+    private String getOption(String key, String currentValue) {
+        String newValue = currentValue;
+        if (additionalProperties.containsKey(key)) {
+            newValue = additionalProperties.get(key).toString();
+        } else {
+            additionalProperties.put(key, newValue);
+        }
+        return newValue;
+    }
+
+    private boolean getSwitch(String key, boolean currentValue) {
+        boolean newValue = currentValue;
+        if (additionalProperties.containsKey(key)) {
+            newValue = convertPropertyToBooleanAndWriteBack(key);
+        } else {
+            additionalProperties.put(key, newValue);
+        }
+        return newValue;
+    }
+
+    private CliOption getCliOption(String key) {
+        CliOption newValue = null;
+        for (CliOption cliOption : cliOptions) {
+            if (cliOption.getOpt().equals(key)) {
+                newValue = cliOption;
+                break;
+            }
+        }
+        return newValue;
+    }
+
+
+    private String setCliOption(String key, String type) throws IllegalArgumentException {
+
+        CliOption cliOption = getCliOption(key);
+        if (additionalProperties.containsKey(key)) {
+            // TODO Hack - not sure why the empty strings become boolean.
+            Object obj = additionalProperties.get(key);
+            //if (!SchemaTypeUtil.BOOLEAN_TYPE.equals(cliOption.getType())) {
+            //    if (obj instanceof Boolean) {
+            //        obj = "";
+            //        additionalProperties.put(key, obj);
+            //    }
+            //}
+            if (obj != null) cliOption.setOptValue(obj.toString());
+        } else {
+            additionalProperties.put(cliOption.getOpt(), cliOption.getOptValue());
+        }
+        if (cliOption.getOptValue() == null) {
+            cliOption.setOptValue(cliOption.getDefault());
+            throw new IllegalArgumentException(cliOption.getOpt() + ": Invalid value '" + additionalProperties.get(cliOption.getOpt()).toString() + "'" +
+                    ". " + cliOption.getDescription());
+        }
+        return cliOption.getOptValue();
+    }
 
 
     @SuppressWarnings("Duplicates")
-    private enum  InfrastructureFramework {
+    private enum InfrastructureFramework {
         TERRAFORM("Terraform", "HashiCorp Terraform tool and HCL language."),
         CLOUDFORMATION("CloudFormation", "AWS CloudFormation infrastructure definition language."),
         SAM("SAM", "AWS Serverless Application Model infrastructure definition language.");
